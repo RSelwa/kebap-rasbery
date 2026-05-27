@@ -127,13 +127,16 @@ def engine_loop():
                     color = tuple(layer.get("color", [255, 255, 255]))
                     draw.text((x, y), content, fill=color)
 
-            except Exception as e:
-                # print(f"Erreur rendu : {e}")
+            except Exception:
                 pass
 
         # Envoi du canevas final sur la matrice physique
         offscreen_canvas.Clear()
-        offscreen_canvas.SetImage(base_img)
+        pixels = base_img.load()
+        for py in range(CANVAS_HEIGHT):
+            for px in range(CANVAS_WIDTH):
+                r, g, b = pixels[px, py]
+                offscreen_canvas.SetPixel(px, py, r, g, b)
         offscreen_canvas = matrix.SwapOnVSync(offscreen_canvas)
 
         # Attente pour maintenir le TARGET_FPS (en tenant compte du temps de rendu)
