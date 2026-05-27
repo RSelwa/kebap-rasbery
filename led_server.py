@@ -1,11 +1,12 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from rgbmatrix import RGBMatrix, RGBMatrixOptions
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageSequence
 import threading
 import time
 import io
 import base64
+import uuid
 import os
 
 # =============================================================================
@@ -180,6 +181,72 @@ def update_layout():
 
     print(f"📥 Layout reçu (Reset: {should_reset})")
     return jsonify({"status": "success", "ok": True}), 200
+
+
+@app.route("/api/upload", methods=["POST"])
+def upload_media():
+    global current_layout, decoded_assets, layer_state
+
+    file = request.files.get("file")
+    if not file:
+        return jsonify({"error": "Aucun fichier reçu"}), 400
+
+    media_id = uuid.uuid4().hex[:8]
+    filename = file.filename.lower()
+    file_bytes = file.read()
+    frames = []
+    fps = DEFAULT_LAYER_FPS
+
+    try:
+        if filename.endswith(".gif"):
+            # Extraction des frames depuis un GIF (Pillow)
+            gif = Image.open(io.BytesIO(file_bytes))
+            duration_ms = gif.info.get("duration", 1000 / DEFAULT_LAYER_FPS)
+            fps = round(1000 / max(duration_ms, 1))
+            for frame in ImageSequence.Iterator(gif):
+                img = frame.convert("RGB").resize((CANVAS_WIDTH, CANVAS_HEIGHT), Image.LANCZOS)
+                frames.append(img)
+
+        else:
+            # Extraction des frames depuis une vidéo (imageio + ffmpeg)
+            try:
+                import imageio
+                reader = imageio.get_reader(io.BytesIO(file_bytes), format="ffmpeg")
+                fps = round(reader.get_meta_data().get("fps", DEFAULT_LAYER_FPS))
+                for frame in reader:
+                    img = Image.fromarray(frame).convert("RGB").resize((CANVAS_WIDTH, CANVAS_HEIGHT), Image.LANCZOS)
+                    frames.append(img)
+            except ImportError:
+                return jsonify({"error": "imageio[ffmpeg] requis pour les vidéos. pip install imageio[ffmpeg]"}), 400
+
+    except Exception as e:
+        return jsonify({"error": f"Erreur lecture fichier : {e}"}), 400
+
+    if not frames:
+        return jsonify({"error": "Aucune frame extraite du fichier"}), 400
+
+    # Activation immédiate sur la matrice (sans passer par HTTP)
+    with lock:
+        decoded_assets = {f"{media_id}_frames": frames}
+        layer_state = {
+            media_id: {"frame_index": 0, "last_frame_time": time.monotonic()}
+        }
+        # On utilise une liste de None comme placeholder — les frames sont déjà décodées
+        current_layout = {
+            "layers": [{
+                "id": media_id,
+                "type": "media",
+                "frames": [None] * len(frames),
+                "fps": fps,
+                "x": 0,
+                "y": 0,
+                "w": CANVAS_WIDTH,
+                "h": CANVAS_HEIGHT,
+            }]
+        }
+
+    print(f"📤 Upload: {media_id} — {len(frames)} frames @ {fps}fps")
+    return jsonify({"media_id": media_id, "frame_count": len(frames), "fps": fps}), 200
 
 
 if __name__ == "__main__":
