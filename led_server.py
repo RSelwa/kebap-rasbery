@@ -15,6 +15,8 @@ app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 32 * 1024 * 1024
 CORS(app)
 
+lock = threading.Lock()
+
 # --- CONFIG MATRICE LED ---
 options = RGBMatrixOptions()
 options.rows = 64
@@ -41,34 +43,42 @@ def decode_base64_img(data_url, w, h):
         return None
 
 def engine_loop():
-    global current_layout, decoded_assets, layer_state
     offscreen_canvas = matrix.CreateFrameCanvas()
-    
+
     while True:
-        # Création du canevas de base (fond noir)
+        frame_start = time.monotonic()
+
+        # Création du canevas de base (fond noir 128x64)
         base_img = Image.new('RGB', (128, 64), (0, 0, 0))
-        
-        for layer in current_layout.get("layers", []):
+
+        # Lecture thread-safe des données partagées avec le serveur Flask
+        with lock:
+            layout = current_layout
+            assets = decoded_assets
+            states = layer_state
+
+        # Dessin de chaque layer sur le canevas
+        for layer in layout.get("layers", []):
             try:
                 layer_id = layer.get('id') or layer.get('type', 'unknown')
                 x = int(float(layer.get('x', 0)))
                 y = int(float(layer.get('y', 0)))
-                
+
                 # CAS 1 : MÉDIA ANIMÉ (Multi-frames)
                 if layer.get("type") == "media" and "frames" in layer:
-                    state = layer_state.get(layer_id)
+                    state = states.get(layer_id)
                     if state:
                         fps = layer.get("fps", 12)
                         frame_duration = 1.0 / fps
                         now = time.monotonic()
-                        
+
                         # Changement de frame si le délai est passé
                         if now - state["last_frame_time"] >= frame_duration:
                             state["frame_index"] = (state["frame_index"] + 1) % len(layer["frames"])
                             state["last_frame_time"] = now
-                        
+
                         # Récupération de l'image décodée correspondante
-                        frames_list = decoded_assets.get(f"{layer_id}_frames", [])
+                        frames_list = assets.get(f"{layer_id}_frames", [])
                         if frames_list:
                             current_frame = frames_list[state["frame_index"]]
                             if current_frame:
@@ -76,7 +86,7 @@ def engine_loop():
 
                 # CAS 2 : IMAGE STATIQUE
                 elif layer.get('data') and layer.get('type') != 'text':
-                    img_static = decoded_assets.get(f"{layer_id}_static")
+                    img_static = assets.get(f"{layer_id}_static")
                     if img_static is not None:
                         base_img.paste(img_static, (x, y))
 
@@ -91,16 +101,14 @@ def engine_loop():
                 # print(f"Erreur rendu : {e}")
                 pass
 
-        # Rendu sur la matrice physique
+        # Envoi du canevas final sur la matrice physique
         offscreen_canvas.Clear()
-        final_img = base_img.convert('RGB').crop((0, 0, 128, 64))
-        pixels = final_img.load()
-        for y in range(64):
-            for x in range(128):
-                r, g, b = pixels[x, y]
-                offscreen_canvas.SetPixel(x, y, r, g, b)
+        offscreen_canvas.SetImage(base_img)
         offscreen_canvas = matrix.SwapOnVSync(offscreen_canvas)
-        time.sleep(0.005) # Fréquence de rafraîchissement élevée
+
+        # Attente pour maintenir ~30fps (en tenant compte du temps de rendu)
+        elapsed = time.monotonic() - frame_start
+        time.sleep(max(0, 0.033 - elapsed))
 
 @app.route('/api/layout', methods=['POST'])
 def update_layout():
@@ -134,9 +142,9 @@ def update_layout():
         elif layer.get('data'):
             new_assets[f"{layer_id}_static"] = decode_base64_img(layer['data'], w, h)
 
-    # Mise à jour des variables globales
-    decoded_assets = new_assets
-    current_layout = payload
+    with lock:
+        decoded_assets = new_assets
+        current_layout = payload
     
     print(f"📥 Layout reçu (Reset: {should_reset})")
     return jsonify({"status": "success", "ok": True}), 200
