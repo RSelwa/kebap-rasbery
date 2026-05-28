@@ -58,6 +58,7 @@ current_layout = {"layers": []}
 decoded_assets = {}  # Stockage des images PIL
 layer_state = {}  # Stockage des index de frames (proposé par Lovable)
 streaming_frame = None  # Frame brute envoyée par /api/frame (mode stream)
+screen_on = True  # État allumé/éteint de la matrice
 
 # --- QUEUE ---
 display_queue = deque()
@@ -104,6 +105,14 @@ def engine_loop():
             layout = current_item["layout"]
             assets = current_item["assets"]
             states = layer_state
+            is_on = screen_on
+
+        if not is_on:
+            offscreen_canvas.Clear()
+            offscreen_canvas = matrix.SwapOnVSync(offscreen_canvas)
+            elapsed = time.monotonic() - frame_start
+            time.sleep(max(0, frame_duration - elapsed))
+            continue
 
         # MODE STREAM : une frame brute a été poussée via /api/frame → on l'affiche directement
         if frame is not None:
@@ -167,8 +176,14 @@ def engine_loop():
         time.sleep(max(0, frame_duration - elapsed))
 
 
+def screen_off_response():
+    return jsonify({"error": "Screen is off", "hint": "POST /api/screen {\"on\": true} to turn it on"}), 403
+
+
 @app.route("/api/frame", methods=["POST"])
 def push_frame():
+    if not screen_on:
+        return screen_off_response()
     data = request.get_data()
     expected = CANVAS_WIDTH * CANVAS_HEIGHT * 3  # RGB brut, pas d'alpha
 
@@ -208,6 +223,8 @@ def stop_stream():
 
 @app.route("/api/layout", methods=["POST"])
 def update_layout():
+    if not screen_on:
+        return screen_off_response()
     global default_item, layer_state
     payload = request.get_json()
     new_assets = {}
@@ -257,6 +274,8 @@ def update_layout():
 
 @app.route("/api/upload", methods=["POST"])
 def upload_media():
+    if not screen_on:
+        return screen_off_response()
     global current_layout, decoded_assets, layer_state
 
     file = request.files.get("file")
@@ -350,6 +369,23 @@ def upload_media():
 
     print(f"📤 Upload: {media_id} — {len(frames)} frames @ {fps}fps")
     return jsonify({"media_id": media_id, "frame_count": len(frames), "fps": fps}), 200
+
+
+@app.route("/api/screen", methods=["GET"])
+def get_screen():
+    return jsonify({"on": screen_on}), 200
+
+
+@app.route("/api/screen", methods=["POST"])
+def set_screen():
+    global screen_on
+    payload = request.get_json(silent=True) or {}
+    if "on" not in payload:
+        return jsonify({"error": "Missing 'on' field"}), 400
+    with lock:
+        screen_on = bool(payload["on"])
+    print(f"💡 Screen {'ON' if screen_on else 'OFF'} ← {request.remote_addr}")
+    return jsonify({"on": screen_on}), 200
 
 
 if __name__ == "__main__":
